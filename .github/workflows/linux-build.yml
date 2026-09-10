@@ -1,0 +1,68 @@
+name: Build AyuGram Desktop Linux (v7.0.9 + lottie patches)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v7.0.9
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          df -h /
+
+      - name: Patch rlottie (OOB fix)
+        run: |
+          cd Telegram/ThirdParty/rlottie
+          git apply "$GITHUB_WORKSPACE/.github/patches/0002-rlottie-fix-oob.patch"
+          grep -q "i + 2 < size" src/lottie/lottiemodel.h && echo PATCH2_OK
+
+      - name: Patch lib_lottie (guard exceptions)
+        run: |
+          python3 "$GITHUB_WORKSPACE/.github/patches/apply_0001.py" "$GITHUB_WORKSPACE/Telegram/lib_lottie"
+          grep -q SafeLoadFromData Telegram/lib_lottie/lottie/lottie_frame_generator.cpp && echo PATCH1_OK
+
+      - name: Build docker image
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          curl -sSL https://install.python-poetry.org | python3 - >/dev/null
+          cd Telegram/build/docker/centos_env
+          poetry install --no-interaction 2>&1 | tail -2
+          export DEBUG=false LTO=false JOBS=4
+          poetry run gen_dockerfile > /tmp/tdockerfile
+          DOCKER_BUILDKIT=1 docker build -t tdesktop:centos_env - < /tmp/tdockerfile 2>&1 | tail -25
+
+      - name: Build AyuGram
+        run: |
+          docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/usr/src/tdesktop" \
+            tdesktop:centos_env \
+            /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh \
+            -D TDESKTOP_API_ID=2040 \
+            -D TDESKTOP_API_HASH=b18441a1ff607e10a989891a5462e627 2>&1 | tail -30
+
+      - name: Collect binary
+        run: |
+          find out -maxdepth 3 -type f -name 'AyuGram*' -exec ls -la {} \;
+          BIN=$(find out -type f -name 'AyuGram' | head -1)
+          test -n "$BIN" || { echo "BINARY NOT FOUND"; exit 1; }
+          file "$BIN"
+          strip --strip-all "$BIN" || true
+          mkdir -p dist
+          cp "$BIN" dist/AyuGram
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AyuGram-linux-x64
+          path: dist/AyuGram
+          if-no-files-found: error
+          retention-days: 14

@@ -1348,6 +1348,34 @@ void SendConfirmedFile(
 	}
 
 	const auto history = session->data().history(file->to.peer);
+
+	// AyuGram: pseudo-reply for deleted/non-replyable targets in file sending
+	// (upstream only does this in SendExistingDocument/SendMessage paths).
+	{
+		const auto isEditing = (file->type != SendMediaType::Audio)
+			&& (file->type != SendMediaType::Round)
+			&& (file->to.replaceMediaOf != 0);
+		if (!isEditing
+			&& file->type != SendMediaType::Audio
+			&& file->type != SendMediaType::Round) {
+			const auto clearReplyTo = prependPseudoReply(
+				session, history, file->caption, file->to.replyTo);
+			if (clearReplyTo) {
+				file->to.replyTo.messageId = FullMsgId(
+					file->to.replyTo.messageId.peer,
+					file->to.replyTo.topicRootId);
+			}
+		} else if (!isEditing && file->to.replyTo) {
+			if (const auto item = session->data().message(file->to.replyTo.messageId)) {
+				if (item->isDeleted()) {
+					file->to.replyTo.messageId = FullMsgId(
+						file->to.replyTo.messageId.peer,
+						file->to.replyTo.topicRootId);
+				}
+			}
+		}
+	}
+
 	const auto local = PrepareConfirmedLocalFile(
 		session,
 		file,

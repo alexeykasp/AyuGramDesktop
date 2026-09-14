@@ -1823,6 +1823,11 @@ void OverlayWidget::updateControls() {
 		return dNow;
 	}();
 	_dateText = d.isValid() ? Ui::FormatDateTime(d) : QString();
+	if (_photo) {
+		_dateText += QString(", DC%1").arg(_photo->getDC());
+	} else if (_document) {
+		_dateText += QString(", DC%1").arg(_document->getDC());
+	}
 	const auto destroyAt = _message ? _message->mediaDestroyAt() : TimeId();
 	if (destroyAt > 0) {
 		const auto left = std::max(
@@ -8823,6 +8828,7 @@ Window::SessionController *OverlayWidget::findWindow(bool switchTo) const {
 
 // #TODO unite and check
 void OverlayWidget::clearBeforeHide() {
+	AyuState::disableGhostModeOnStoryClose(_storiesSession);
 	checkSingleViewMediaBurn();
 	_message = nullptr;
 	_sharedMedia = nullptr;

@@ -1041,7 +1041,15 @@ void Message::refreshRightBadge() {
 	if (const auto badge = Get<RightBadge>(); badge && badge->overridden) {
 		return;
 	}
-	if (hasOutLayout() || context() == Context::WelcomeMessages) {
+	if ((hasOutLayout() || context() == Context::WelcomeMessages)
+		&& !AyuFeatures::MessageShot::isTakingShot()) {
+		if (Has<RightBadge>()) {
+			RemoveComponents(RightBadge::Bit());
+		}
+		return;
+	}
+	if (AyuFeatures::MessageShot::ignoreRender(
+			AyuFeatures::MessageShot::RenderPart::HeaderDecorations)) {
 		if (Has<RightBadge>()) {
 			RemoveComponents(RightBadge::Bit());
 		}
@@ -2668,7 +2676,7 @@ void Message::paintFromName(
 		.elisionLines = 1,
 	});
 	const auto skipWidth = nameWidth
-		+ (_fromNameStatus
+		+ (_fromNameStatus && !hidePremiumStatuses
 			? (st::dialogsPremiumIcon.icon.width()
 				+ st::msgServiceFont->spacew)
 			: 0)

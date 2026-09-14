@@ -381,6 +381,13 @@ TopBar::TopBar(
 	VerifiedContentForPeer(_peer),
 	nullptr,
 	_gifPausedChecker))
+, _exteraBadge(std::make_unique<Badge>(
+	this,
+	st::infoPeerBadge,
+	&_peer->session(),
+	ExteraBadgeTypeFromPeer(_peer),
+	nullptr,
+	_gifPausedChecker))
 , _hasActions(!_savedMessages
 	&& descriptor.source != Source::Stories
 	&& descriptor.source != Source::Preview

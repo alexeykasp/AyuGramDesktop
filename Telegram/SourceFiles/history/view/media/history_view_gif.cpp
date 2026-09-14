@@ -827,7 +827,7 @@ void Gif::draw(Painter &p, const PaintContext &context) const {
 			|| (!streamingMode
 				&& ((!loaded && !_data->loading()) || !autoplay))
 			|| ttlCovered);
-	if (paintInCenter) {
+	if (paintInCenter && !AyuFeatures::MessageShot::isTakingShot()) {
 		const auto radialRevealed = 1.;
 		const auto opacity = (item->isSending() || _data->uploading())
 			? 1.
@@ -1342,9 +1342,11 @@ void Gif::drawCornerStatus(
 		return;
 	}
 	const auto own = activeOwnStreamed();
+	const auto shot = AyuFeatures::MessageShot::isTakingShot();
 	const auto download = downloadInCorner()
 		&& !dataLoaded()
-		&& !_data->loadedInMediaCache();
+		&& !_data->loadedInMediaCache()
+		&& !shot;
 	PaintVideoCornerStatus(p, context, {
 		.text = ((own && !own->frozenStatusText.isEmpty())
 			? own->frozenStatusText
@@ -1357,7 +1359,7 @@ void Gif::drawCornerStatus(
 			: nullptr),
 		.download = download,
 		.loading = _data->loading(),
-		.mute = (_streamed && _data->isVideoFile() && !download),
+		.mute = (_streamed && _data->isVideoFile() && !download && !shot),
 	});
 }
 

@@ -1301,6 +1301,24 @@ Element::Element(
 			AddComponents(FakeBotAboutTop::Bit());
 		}
 	}
+	const auto deletedOpacityEnabled
+		= AyuSettings::getInstance().semiTransparentDeletedMessages();
+	if (deletedOpacityEnabled
+		&& replacing
+		&& replacing->_deletedOpacityAnimation.animating()) {
+		_deletedOpacityAnimation = replacing->takeDeletedAnimation();
+		_deletedOpacityAnimationTarget
+			= replacing->_deletedOpacityAnimationTarget;
+		refreshDeletedAnimationTarget();
+	} else if (deletedOpacityEnabled
+		&& data->isDeleted()
+		&& data->wasDeletedAnimated()) {
+		// grouped messages handle it per-item
+		if (!history()->owner().groups().find(data)) {
+			startDeletedAnimation();
+			data->markDeletedAnimated();
+		}
+	}
 	refreshEphemeralBadge();
 }
 
@@ -1615,6 +1633,9 @@ bool Element::hidesBottomInfo() const {
 int Element::skipBlockWidth() const {
 	if (hidesBottomInfo()) {
 		return 0;
+	}
+	if (AyuFeatures::MessageShot::ignoreRender(AyuFeatures::MessageShot::RenderPart::Date)) {
+		return st::msgDateDelta.x();
 	}
 	return st::msgDateSpace + infoWidth() - st::msgDateDelta.x();
 }

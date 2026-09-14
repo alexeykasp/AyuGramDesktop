@@ -893,7 +893,7 @@ void Photo::drawGrouped(
 			|| (!loaded && !_data->loading())
 			|| _data->waitingForAlbum()
 			|| ttlCovered);
-	if (paintInCenter) {
+	if (paintInCenter && !AyuFeatures::MessageShot::isTakingShot()) {
 		const auto radialOpacity = radial
 			? _animation->radial.opacity()
 			: 1.;

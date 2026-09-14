@@ -1205,6 +1205,7 @@ void StickerSetBox::updateButtons() {
 						[=] { _inner->archiveStickers(); },
 						&st::menuIconArchive);
 				}
+				addPackIdActions(raw);
 				if (fillSetCreatorFooter) {
 					fillSetCreatorFooter(raw);
 				}

@@ -1978,11 +1978,6 @@ void Updater::start(bool forceWait) {
 				&_httpImplementation,
 				std::make_unique<HttpChecker>(_testing));
 		}
-		startImplementation(
-			&_mtpImplementation,
-			std::make_unique<MtpChecker>(
-				LookupCanaryPrivateSession(_session),
-				_testing));
 
 		_checking.fire({});
 	} else {

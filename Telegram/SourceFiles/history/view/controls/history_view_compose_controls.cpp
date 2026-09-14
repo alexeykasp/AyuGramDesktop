@@ -151,7 +151,7 @@ namespace {
 
 constexpr auto kSaveDraftTimeout = crl::time(1000);
 constexpr auto kSaveDraftAnywayTimeout = 5 * crl::time(1000);
-constexpr auto kSaveCloudDraftIdleTimeout = 14 * crl::time(1000);
+constexpr auto kSaveCloudDraftIdleTimeout = 12 * crl::time(1000);
 constexpr auto kDisplayEditTimeWarningMs = 300 * 1000;
 constexpr auto kFullDayInMs = 86400 * 1000;
 constexpr auto kMouseEvents = {
@@ -189,6 +189,13 @@ using SendActionUpdate = ComposeControls::SendActionUpdate;
 using SetHistoryArgs = ComposeControls::SetHistoryArgs;
 using VoiceRecordBar = Controls::VoiceRecordBar;
 using ForwardPanel = Controls::ForwardPanel;
+
+#define SWITCH_BUTTON(button, show_v) \
+	if (show_v) { \
+		(button)->show(); \
+	} else { \
+		(button)->hide(); \
+	}
 
 [[nodiscard]] QString FirstEmoji(const QString &s) {
 	const auto begin = s.data();
@@ -3965,10 +3972,13 @@ void ComposeControls::initTabbedSelector() {
 						if (_sendAsFileConfirmed) {
 							_sendAsFileConfirmed(
 								Ui::MakeSingleFileBundle(std::move(edited)),
-								options);
+							options);
 						}
 						return;
 					}
+					const auto effectiveFrom = options.scheduled
+						? Ui::MessageSendingAnimationFrom()
+						: from;
 					_fileChosen.fire({
 						.document = document,
 						.options = options,
@@ -4941,6 +4951,8 @@ void ComposeControls::updateControlsGeometry(QSize size) {
 	// (_commentsShown) (_attachToggle|_replaceMedia) (_sendAs) -- _inlineResults ------ _tabbedPanel -- _fieldBarCancel (_starsReaction)
 	// (_attachDocument|_attachPhoto) _field (_ttlInfo) (_scheduled) (_silent|_botCommandStart) _tabbedSelectorToggle _send
 
+	const auto &settings = AyuSettings::getInstance();
+
 	const auto oldComposeHeight = composeFieldHeight();
 	const auto commentsShown = _commentsShown
 		&& !_commentsShown->isHidden();
@@ -4950,18 +4962,16 @@ void ComposeControls::updateControlsGeometry(QSize size) {
 		- (commentsShown
 			? (_commentsShown->width() + _st.commentsSkip)
 			: 0)
-		- ((_attachToggle || _sendAs) ? _st.padding.left() : _st.fieldLeft)
+		- (((_attachToggle && settings.showAttachButtonInMessageField()) || _sendAs) ? _st.padding.left() : _st.fieldLeft)
 		- (_botMenu.button
 			? (st::historyBotMenuSkip + _botMenu.button->width())
 			: 0)
-		- (_attachToggle ? _attachToggle->width() : 0)
+		- (_attachToggle && settings.showAttachButtonInMessageField() ? _attachToggle->width() : 0)
 		- (_sendAs ? _sendAs->width() : 0)
 		- _st.padding.right()
 		- _send->width()
 		- (_editStars ? _editStars->width() : 0)
-		- (_tabbedSelectorToggle->isHidden()
-			? 0
-			: _tabbedSelectorToggle->width())
+		- (settings.showEmojiButtonInMessageField() ? _tabbedSelectorToggle->width() : 0)
 		- (_likeShown ? _like->width() : 0)
 		- (_botCommandShown && settings.showCommandsButtonInMessageField() ? _botCommandStart->width() : 0)
 		- ((_silent && !_silent->isHidden()) ? _silent->width() : 0)
@@ -4974,7 +4984,11 @@ void ComposeControls::updateControlsGeometry(QSize size) {
 			: 0)
 		- (_botKeyboardShow ? _botKeyboardShow->width() : 0)
 		- (_botKeyboardHide ? _botKeyboardHide->width() : 0)
-		- ((_ttlInfo && _ttlInfo->isVisible()) ? _ttlInfo->width() : 0)
+		- ((_ttlInfo
+			&& _ttlInfo->isVisible()
+			&& settings.showAutoDeleteButtonInMessageField())
+			? _ttlInfo->width()
+			: 0)
 		- (_starsReaction
 			? (_st.starsSkip + _starsReaction->width())
 			: 0);
@@ -5046,8 +5060,8 @@ void ComposeControls::updateControlsGeometry(QSize size) {
 		_editStars->moveToRight(right, buttonsTop);
 		right += _editStars->width();
 	}
-	_tabbedSelectorToggle->moveToRight(right, buttonsTop);
-	if (!_tabbedSelectorToggle->isHidden()) {
+	if (settings.showEmojiButtonInMessageField()) {
+		_tabbedSelectorToggle->moveToRight(right, buttonsTop);
 		right += _tabbedSelectorToggle->width();
 	}
 	if (_like) {
@@ -5112,6 +5126,8 @@ void ComposeControls::updateControlsGeometry(QSize size) {
 }
 
 void ComposeControls::updateControlsVisibility() {
+	const auto &settings = AyuSettings::getInstance();
+
 	const auto hide = hideExtraButtons()
 		|| isEditingMessage()
 		|| textExceedsMaxSize();
@@ -5157,6 +5173,11 @@ void ComposeControls::updateControlsVisibility() {
 	}
 	if (_starsReaction) {
 		_starsReaction->show();
+	}
+	SWITCH_BUTTON(_tabbedSelectorToggle, settings.showEmojiButtonInMessageField());
+	if (_ttlInfo) {
+		_ttlInfo->setVisible(
+			!hide && settings.showAutoDeleteButtonInMessageField());
 	}
 	updateAiButtonVisibility();
 	updateSendAsFileVisibility();

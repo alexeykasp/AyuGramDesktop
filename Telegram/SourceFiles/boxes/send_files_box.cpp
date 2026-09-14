@@ -1283,6 +1283,36 @@ void SendFilesBox::addMenuButton() {
 			_menu = nullptr;
 			return true;
 		}
+
+		using ImageInfo = Ui::PreparedFileInformation::Image;
+		if (_list.files.size() == 1 && std::get_if<ImageInfo>(&_list.files[0].information->media)) {
+			_menu->addAction(
+				tr::ayu_SendAsSticker(tr::now),
+				[=]() mutable
+				{
+					const auto file = std::move(_list.files[0]);
+					_list.files.clear();
+
+					const auto sourceImage = std::get_if<ImageInfo>(&file.information->media);
+
+					QByteArray targetArray;
+					QBuffer buffer(&targetArray);
+					buffer.open(QIODevice::WriteOnly);
+					sourceImage->data.save(&buffer, "WEBP");
+
+					QImage targetImage;
+					targetImage.loadFromData(targetArray, "WEBP");
+
+					addFiles(Storage::PrepareMediaFromImage(std::move(targetImage),
+															std::move(targetArray),
+															st::sendMediaPreviewSize));
+					_list.overrideSendImagesAsPhotos = false;
+					initSendWay();
+
+					send({}, false);
+				},
+				&st::menuIconStickers);
+		}
 		_menu->popupPrepared();
 		return true;
 	});
@@ -2601,6 +2631,11 @@ void SendFilesBox::send(
 		showToast(tr::lng_ttl_no_schedule(tr::now));
 		return;
 	}
+	const auto sumSize = ranges::accumulate(
+		_list.files, int64(0),
+		[](int64 sum, const auto &file) { return sum + file.size; });
+	applyGhostScheduling(&_show->session(), options, getScheduleTime(sumSize));
+
 	if ((_sendType == Api::SendType::Scheduled
 		|| _sendType == Api::SendType::ScheduledToUser)
 		&& !options.scheduled) {

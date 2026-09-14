@@ -32,7 +32,7 @@ UnsupportedNotice::UnsupportedNotice(not_null<Element*> parent)
 , _link(MakeUpdateTelegramHandler()) {
 	_card.setTexts(
 		tr::lng_unsupported_message_title(tr::now),
-		tr::lng_unsupported_message_text(tr::now),
+		tr::lng_unsupported_message_text(tr::now).replace("Telegram", "AyuGram"),
 		tr::lng_unsupported_message_update(tr::now));
 }
 

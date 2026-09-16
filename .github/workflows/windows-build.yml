@@ -1,0 +1,70 @@
+name: Windows x64 Build (Qt6)
+
+on:
+  push:
+    branches: [sync-7.2.8]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Windows x64
+    runs-on: depot-windows-2022-8
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Ninja
+        run: choco install -y ninja
+
+      - name: Download Qt6 + build dependencies
+        shell: cmd
+        run: |
+          cd Telegram\build\prepare
+          python prepare.py qt6
+        env:
+          Platform: x64
+
+      - name: Configure CMake
+        shell: cmd
+        run: |
+          cmake -B build -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>" ^
+            -DQT6=ON
+        env:
+          Platform: x64
+
+      - name: Build AyuGram
+        shell: cmd
+        run: |
+          cmake --build build --config Release -- -m:8
+        env:
+          CL_MPCount: 8
+
+      - name: Strip debug info
+        shell: cmd
+        run: |
+          if exist build\Telegram\Release\AyuGram.exe (
+            strip --strip-all build\Telegram\Release\AyuGram.exe
+          )
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AyuGram-windows-x64
+          path: build/Telegram/Release/*.exe
+          if-no-files-found: error

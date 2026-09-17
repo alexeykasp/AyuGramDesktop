@@ -37,14 +37,12 @@ jobs:
           python prepare.py qt6
         env:
           Platform: x64
+          COMSPEC: C:\Windows\System32\cmd.exe
 
       - name: Configure CMake
         shell: cmd
         run: |
-          cmake -B build -G Ninja ^
-            -DCMAKE_BUILD_TYPE=Release ^
-            -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>" ^
-            -DQT6=ON
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DQT6=ON
         env:
           Platform: x64
 
@@ -54,13 +52,6 @@ jobs:
           cmake --build build --config Release -- -m:8
         env:
           CL_MPCount: 8
-
-      - name: Strip debug info
-        shell: cmd
-        run: |
-          if exist build\Telegram\Release\AyuGram.exe (
-            strip --strip-all build\Telegram\Release\AyuGram.exe
-          )
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

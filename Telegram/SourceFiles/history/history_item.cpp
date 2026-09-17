@@ -551,7 +551,7 @@ HistoryItem::HistoryItem(
 		createComponents(data);
 		if (media) {
 			setMedia(*media);
-			if (checked == MediaCheckResult::HasUnsupportedTimeToLive) {
+			if (checked == MediaCheckResult::HasExpiredMediaTimeToLive) {
 				media->match(
 					[&](const MTPDmessageMediaPhoto &media)
 					{

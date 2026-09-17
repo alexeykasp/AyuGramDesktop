@@ -49,9 +49,9 @@ jobs:
       - name: Build AyuGram
         shell: cmd
         run: |
-          cmake --build build --config Release -- -m:8
+          cmake --build build --config Release -- -m:2
         env:
-          CL_MPCount: 8
+          CL_MPCount: 2
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

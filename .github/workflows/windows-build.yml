@@ -5,66 +5,111 @@ on:
     branches: [sync-7.2.8]
   workflow_dispatch:
 
+env:
+  TBUILD: ${{ github.workspace }}\TBuild
+  SRC: ${{ github.workspace }}\TBuild\tdesktop
+
 jobs:
   build:
     name: Build Windows x64
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: pwsh
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
+          path: TBuild/tdesktop
 
-      - name: Install C++ ATL (breakpad dependency)
-        shell: powershell
+      - name: Read toolchain version
+        id: toolchain
+        shell: bash
         run: |
-          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $installPath = & $vsWhere -latest -property installationPath
-          $installerPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
-          Start-Process -FilePath $installerPath -ArgumentList "modify","--installPath","`"$installPath`"","--add","Microsoft.VisualStudio.Component.VC.ATL","--quiet","--wait" -Wait -NoNewWindow
-          Write-Host "ATL component installed"
+          sdk=$(sed -n 's/.*\*\*\([^*]*\)\*\* SDK version.*/\1/p' "$SRC/docs/building-win.md" | head -1)
+          echo "sdk=$sdk" >> "$GITHUB_OUTPUT"
 
-      - name: Setup MSVC
-        uses: ilammy/msvc-dev-cmd@v1
+      - name: Install Visual Studio ATL component
+        run: |
+          $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
+          $vswhere = Join-Path $installer 'vswhere.exe'
+          $setup = Join-Path $installer 'setup.exe'
+          $toolsComponent = 'Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64'
+          $atlComponent = 'Microsoft.VisualStudio.Component.VC.14.44.17.14.ATL'
+          $path = @(& $vswhere -latest -products '*' -requires $toolsComponent -property installationPath)[0]
+          if (-not $path) { throw "No Visual Studio instance provides $toolsComponent." }
+          $toolset = Get-ChildItem (Join-Path $path 'VC\Tools\MSVC') -Directory |
+            Where-Object { $_.Name -like '14.44.*' } |
+            Sort-Object Name -Descending |
+            Select-Object -First 1
+          $header = Join-Path $toolset.FullName 'atlmfc\include\atlbase.h'
+          if (-not (Test-Path $header)) {
+            $process = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
+              'modify', '--installPath', "`"$path`"", '--add', $atlComponent,
+              '--quiet', '--norestart', '--nocache')
+            if ($process.ExitCode -notin @(0, 3010)) { exit $process.ExitCode }
+          }
+          if (-not (Test-Path $header)) { throw "ATL was not installed at $header." }
+
+      - name: Native Tools Command Prompt
+        uses: Eden-CI/msvc-dev-cmd@1bd71f95d6f3d1b2b3395b335cc63bcdc90cf223
         with:
           arch: x64
+          sdk: ${{ steps.toolchain.outputs.sdk }}
+          toolset: '14.44'
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Ninja
-        run: choco install -y ninja
+      - name: Install build tools
+        run: |
+          choco install -y ninja ccache --version=4.14.0
 
-      - name: Download Qt6 + build dependencies
+      - name: Restore ThirdParty cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: windows-x64-third-party-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/prepare.py') }}
+          restore-keys: windows-x64-third-party-
+
+      - name: Restore Libraries cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TBUILD }}\Libraries\win64
+          key: windows-x64-libraries-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/prepare.py') }}
+          restore-keys: windows-x64-libraries-
+
+      - name: Prepare libraries
+        shell: cmd
+        env:
+          CCACHE_DISABLE: '1'
+        run: call %SRC%\Telegram\build\prepare\win.bat silent qt-release-only
+
+      - name: Configure Release
         shell: cmd
         run: |
-          cd Telegram\build\prepare
-          python prepare.py qt6
-        env:
-          Platform: x64
-          COMSPEC: C:\Windows\System32\cmd.exe
-
-      - name: Configure CMake
-        shell: cmd
-        run: |
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DQT6=ON
-        env:
-          Platform: x64
+          ccache --zero-stats
+          cd /d %SRC%\Telegram
+          call configure.bat -G "Ninja Multi-Config" ^
+            -D CMAKE_CONFIGURATION_TYPES=Release ^
+            -D CMAKE_EXPORT_COMPILE_COMMANDS=ON ^
+            "-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=" ^
+            -D CMAKE_C_COMPILER_LAUNCHER=ccache ^
+            -D CMAKE_CXX_COMPILER_LAUNCHER=ccache ^
+            -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
+            -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
 
       - name: Build AyuGram
         shell: cmd
-        run: |
-          cmake --build build --config Release -- -m:2
-        env:
-          CL_MPCount: 2
+        run: cmake --build %SRC%\out --config Release --parallel --target Telegram
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: AyuGram-windows-x64
-          path: build/Telegram/Release/*.exe
+          path: ${{ env.SRC }}\out\Telegram\Release\*.exe
           if-no-files-found: error

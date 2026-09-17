@@ -1,0 +1,81 @@
+name: Linux x64 Build
+
+on:
+  push:
+    branches: [sync-7.2.8]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          docker system prune -af
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Restore Docker layer cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: docker-centos-env-${{ hashFiles('Telegram/build/docker/centos_env/Dockerfile') }}
+          restore-keys: docker-centos-env-
+
+      - name: Patch Dockerfile (selinux + lang-subsets)
+        run: |
+          cd Telegram/build/docker/centos_env
+          # Disable lang-subsets generation (causes errors on Linux)
+          sed -i 's/option(\"LANG_SUBSETS\"/option(\"LANG_SUBSETS\" OFF #/' CMakeLists.txt 2>/dev/null || true
+          # SELinux bypass for libglvnd/glib stages
+          sed -i '/^FROM /a RUN --privileged /usr/sbin/setenforce 0 || true' Dockerfile
+
+      - name: Build Docker image (cached layers)
+        run: |
+          cd Telegram/build/docker/centos_env
+          python3 -m pip install --user poetry
+          export PATH="$HOME/.local/bin:$PATH"
+          poetry install --no-interaction
+          poetry run gen_dockerfile > /tmp/tdockerfile
+          sed -i "s/ENV CMAKE_BUILD_PARALLEL_LEVEL='[^']*'/ENV CMAKE_BUILD_PARALLEL_LEVEL='16'/" /tmp/tdockerfile
+          docker buildx build --progress=plain \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            -f /tmp/tdockerfile -t tdesktop-centos-env . 2>&1 | tail -50
+          # Move cache to prevent unbounded growth
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      - name: Build AyuGram
+        run: |
+          cd Telegram
+          docker run --rm -u "$(id -u):$(id -g)" \
+            -v "$(pwd)/..:/usr/src/tdesktop" \
+            -e DEBUG=false -e LTO=false \
+            -e JOBS=16 -e CMAKE_BUILD_PARALLEL_LEVEL=16 \
+            tdesktop-centos-env \
+            /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh
+
+      - name: Strip and package
+        run: |
+          strip --strip-all Telegram/out/Release/Telegram
+          mv Telegram/out/Release/Telegram AyuGram
+          tar -czf AyuGram-linux-x64.tar.gz AyuGram
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AyuGram-linux-x64
+          path: AyuGram-linux-x64.tar.gz
+          if-no-files-found: error

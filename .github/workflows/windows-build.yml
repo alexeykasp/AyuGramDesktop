@@ -67,7 +67,8 @@ jobs:
 
       - name: Install build tools
         run: |
-          choco install -y ninja ccache --version=4.14.0
+          choco install -y ninja
+          choco install ccache --version=4.14.0 --no-progress -y
 
       - name: Restore ThirdParty cache
         uses: actions/cache@v4

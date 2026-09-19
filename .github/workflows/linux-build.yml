@@ -51,7 +51,7 @@ jobs:
           # lang-subsets generation loses ayu_* keys on Linux -> build error.
           python3 - <<'PY'
           from pathlib import Path
-          gen = Path('../../cmake/generate_lang.cmake')
+          gen = Path('../../../cmake/generate_lang.cmake')
           t = gen.read_text()
           old = 'if (NOT CMAKE_GENERATOR MATCHES "Visual Studio|Xcode")'
           if old in t:

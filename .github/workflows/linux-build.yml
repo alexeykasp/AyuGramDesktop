@@ -48,22 +48,18 @@ jobs:
       - name: Patch Dockerfile
         run: |
           cd Telegram/build/docker/centos_env
-          # lang-subsets generation fails on this base image; skip it.
+          # lang-subsets generation loses ayu_* keys on Linux -> build error.
           python3 - <<'PY'
           from pathlib import Path
-          cm = Path('CMakeLists.txt')
-          if cm.exists():
-              t = cm.read_text()
-              if 'LANG_SUBSETS' in t and 'OFF # LANG_SUBSETS' not in t:
-                  t = t.replace('option("LANG_SUBSETS"', 'option("LANG_SUBSETS" OFF #', 1)
-                  cm.write_text(t)
-                  print('LANG_SUBSETS disabled')
+          gen = Path('../../cmake/generate_lang.cmake')
+          t = gen.read_text()
+          old = 'if (NOT CMAKE_GENERATOR MATCHES "Visual Studio|Xcode")'
+          if old in t:
+              gen.write_text(t.replace(old, 'if (FALSE)'))
+              print('lang-subsets disabled')
+          else:
+              print('generate_lang.cmake already patched')
           PY
-          # SELinux blocks some installs inside the container; lift it.
-          if grep -q 'setenforce' Dockerfile; then :; else
-            sed -i '0,/^FROM /s//RUN --privileged \/usr\/sbin\/setenforce 0 || true\nFROM /' Dockerfile
-            echo 'SELinux bypass added'
-          fi
 
       - name: Generate Dockerfile
         run: |

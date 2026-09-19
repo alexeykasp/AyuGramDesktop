@@ -1,17 +1,31 @@
-name: Windows x64 Build (Qt6)
+name: Windows x64 Build
 
 on:
   push:
     branches: [sync-7.2.8]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  actions: write
+
 env:
+  GH_TOKEN: ${{ github.token }}
+  # The runner image leaves ~25 GB free on C:, a Release build does not fit;
+  # the workspace drive is 150 GB and all but empty.
   TBUILD: ${{ github.workspace }}\TBuild
   SRC: ${{ github.workspace }}\TBuild\tdesktop
+  CCACHE_DIR: ${{ github.workspace }}\TBuild\ccache
+  CCACHE_DEPEND: 'true'
+  # 2554 objects do not fit in two gigabytes: the cache filled to 98% and
+  # evicted 655 of its own entries mid-build, costing a quarter of the hits.
+  CCACHE_MAXSIZE: 3G
+  CCACHE_COMPILERCHECK: content
+  CCACHE_SLOPPINESS: pch_defines,time_macros
 
 jobs:
   build:
-    name: Build Windows x64
+    name: Windows x64 (Qt6)
     runs-on: windows-latest
     timeout-minutes: 350
     defaults:
@@ -29,6 +43,7 @@ jobs:
         shell: bash
         run: |
           sdk=$(sed -n 's/.*\*\*\([^*]*\)\*\* SDK version.*/\1/p' "$SRC/docs/building-win.md" | head -1)
+          test -n "$sdk"
           echo "sdk=$sdk" >> "$GITHUB_OUTPUT"
 
       - name: Install Visual Studio ATL component
@@ -65,37 +80,81 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install build tools
+      - name: Install the compiler cache
         run: |
-          choco install -y ninja
           choco install ccache --version=4.14.0 --no-progress -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ccache --version
 
       - name: Restore ThirdParty cache
-        uses: actions/cache@v4
+        id: third-party-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.TBUILD }}\ThirdParty
-          key: windows-x64-third-party-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/prepare.py') }}
+          key: windows-x64-third-party-${{ steps.toolchain.outputs.sdk }}
           restore-keys: windows-x64-third-party-
 
-      - name: Restore Libraries cache
-        uses: actions/cache@v4
+      - name: Restore libraries cache
+        id: libraries-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.TBUILD }}\Libraries\win64
-          key: windows-x64-libraries-${{ hashFiles('TBuild/tdesktop/Telegram/build/prepare/prepare.py') }}
-          restore-keys: windows-x64-libraries-
+          key: windows-x64-release-libraries-${{ steps.toolchain.outputs.sdk }}
+          restore-keys: windows-x64-release-libraries-
 
       - name: Prepare libraries
         shell: cmd
         env:
+          # meson picks ccache up from PATH and parses the `/showIncludes`
+          # output it wraps, so a compiler cache here breaks the setup of
+          # every meson library. The dependency tree is cached whole anyway.
           CCACHE_DISABLE: '1'
         run: call %SRC%\Telegram\build\prepare\win.bat silent qt6
+
+      - name: Save ThirdParty cache
+        if: steps.third-party-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: windows-x64-third-party-${{ steps.toolchain.outputs.sdk }}
+
+      - name: Save libraries cache
+        if: steps.libraries-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TBUILD }}\Libraries\win64
+          key: windows-x64-release-libraries-${{ steps.toolchain.outputs.sdk }}
+
+      - name: Drop superseded dependency caches
+        continue-on-error: true
+        shell: bash
+        env:
+          KEEP: |
+            ${{ steps.third-party-cache.outputs.cache-primary-key }}
+            ${{ steps.libraries-cache.outputs.cache-primary-key }}
+          PREFIXES: 'windows-x64-third-party- windows-x64-release-libraries-'
+        run: |
+          # Kept under ten gigabytes by deleting what each save superseded,
+          # right after that save rather than at the end of the job.
+          for prefix in $PREFIXES; do
+            gh cache list --repo "$GITHUB_REPOSITORY" --key "$prefix" --limit 100 --json key --jq '.[].key' |
+              grep -vxF "$KEEP" | while read -r key; do gh cache delete --repo "$GITHUB_REPOSITORY" "$key"; done || true
+          done
+
+      - name: Restore compiler cache
+        id: compiler-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.TBUILD }}\ccache
+          key: ccache-windows-x64-release-${{ github.sha }}
+          restore-keys: ccache-windows-x64-release-
 
       - name: Configure Release
         shell: cmd
         run: |
           ccache --zero-stats
           cd /d %SRC%\Telegram
-          call configure.bat -G "Ninja Multi-Config" ^
+          call configure.bat qt6 -G "Ninja Multi-Config" ^
             -D CMAKE_CONFIGURATION_TYPES=Release ^
             -D CMAKE_EXPORT_COMPILE_COMMANDS=ON ^
             "-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=" ^
@@ -107,6 +166,32 @@ jobs:
       - name: Build AyuGram
         shell: cmd
         run: cmake --build %SRC%\out --config Release --parallel --target Telegram
+
+      - name: Save compiler cache
+        # Saved even when the build failed: a retry then resumes from the
+        # objects this run did produce instead of recompiling everything.
+        if: ${{ !cancelled() && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TBUILD }}\ccache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+
+      - name: Drop superseded compiler caches
+        # Matches the save above, so a failed build still replaces its cache.
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          KEEP: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+          PREFIXES: ccache-windows-x64-release-
+        run: |
+          # Deleted before the save rather than after it: the two would
+          # otherwise coexist and the repository would pass the ten
+          # gigabyte limit, evicting a dependency tree that costs hours.
+          for prefix in $PREFIXES; do
+            gh cache list --repo "$GITHUB_REPOSITORY" --key "$prefix" --limit 100 --json key --jq '.[].key' |
+              grep -vxF "$KEEP" | while read -r key; do gh cache delete --repo "$GITHUB_REPOSITORY" "$key"; done || true
+          done
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

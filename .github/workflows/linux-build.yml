@@ -5,11 +5,22 @@ on:
     branches: [sync-7.2.8]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  actions: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  # The centos_env docker image holds the whole dependency tree; its layers
+  # are kept in a persistent buildx cache between runs.
+  DOCKER_BUILDKIT: 1
+  JOBS: 16
+
 jobs:
   build:
-    name: Build Linux x64
+    name: Linux x64 (Docker)
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 350
 
     steps:
       - name: Checkout
@@ -19,58 +30,118 @@ jobs:
 
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          docker system prune -af
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/Code.Toolkit
+          sudo docker image prune -af
           df -h /
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Restore Docker layer cache
-        uses: actions/cache@v4
+      - name: Restore buildx cache
+        id: buildx-cache
+        uses: actions/cache/restore@v4
         with:
           path: /tmp/.buildx-cache
-          key: docker-centos-env-${{ hashFiles('Telegram/build/docker/centos_env/Dockerfile') }}
-          restore-keys: docker-centos-env-
+          key: linux-x64-buildx-${{ hashFiles('Telegram/build/docker/centos_env/**') }}
+          restore-keys: linux-x64-buildx-
 
-      - name: Patch Dockerfile (selinux + lang-subsets)
+      - name: Patch Dockerfile
         run: |
           cd Telegram/build/docker/centos_env
-          # Disable lang-subsets generation (causes errors on Linux)
-          sed -i 's/option(\"LANG_SUBSETS\"/option(\"LANG_SUBSETS\" OFF #/' CMakeLists.txt 2>/dev/null || true
-          # SELinux bypass for libglvnd/glib stages
-          sed -i '/^FROM /a RUN --privileged /usr/sbin/setenforce 0 || true' Dockerfile
+          # lang-subsets generation fails on this base image; skip it.
+          python3 - <<'PY'
+          from pathlib import Path
+          cm = Path('CMakeLists.txt')
+          if cm.exists():
+              t = cm.read_text()
+              if 'LANG_SUBSETS' in t and 'OFF # LANG_SUBSETS' not in t:
+                  t = t.replace('option("LANG_SUBSETS"', 'option("LANG_SUBSETS" OFF #', 1)
+                  cm.write_text(t)
+                  print('LANG_SUBSETS disabled')
+          PY
+          # SELinux blocks some installs inside the container; lift it.
+          if grep -q 'setenforce' Dockerfile; then :; else
+            sed -i '0,/^FROM /s//RUN --privileged \/usr\/sbin\/setenforce 0 || true\nFROM /' Dockerfile
+            echo 'SELinux bypass added'
+          fi
 
-      - name: Build Docker image (cached layers)
+      - name: Generate Dockerfile
         run: |
           cd Telegram/build/docker/centos_env
           python3 -m pip install --user poetry
           export PATH="$HOME/.local/bin:$PATH"
           poetry install --no-interaction
           poetry run gen_dockerfile > /tmp/tdockerfile
-          sed -i "s/ENV CMAKE_BUILD_PARALLEL_LEVEL='[^']*'/ENV CMAKE_BUILD_PARALLEL_LEVEL='16'/" /tmp/tdockerfile
+          # 2-core runner: cap parallelism so the app stage does not OOM;
+          # heavy stages are single-threaded anyway.
+          sed -i "s/ENV CMAKE_BUILD_PARALLEL_LEVEL='[^']*'/ENV CMAKE_BUILD_PARALLEL_LEVEL='${JOBS}'/" /tmp/tdockerfile
+
+      - name: Build docker image (cached layers)
+        run: |
+          cd Telegram/build/docker/centos_env
           docker buildx build --progress=plain --load \
             --cache-from type=local,src=/tmp/.buildx-cache \
             --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
-            -f /tmp/tdockerfile -t tdesktop-centos-env . 2>&1 | tail -50
-          # Move cache to prevent unbounded growth
+            -f /tmp/tdockerfile -t tdesktop-centos-env . 2>&1 | tail -30
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
+      - name: Save buildx cache
+        if: steps.buildx-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: linux-x64-buildx-${{ hashFiles('Telegram/build/docker/centos_env/**') }}
+
+      - name: Drop superseded buildx caches
+        if: steps.buildx-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: |
+          keep="${{ steps.buildx-cache.outputs.cache-primary-key }}"
+          gh cache list --repo "$GITHUB_REPOSITORY" --key linux-x64-buildx- --limit 100 --json key --jq '.[].key' |
+            grep -vxF "$keep" | while read -r key; do gh cache delete --repo "$GITHUB_REPOSITORY" "$key"; done || true
+
+      - name: Restore ccache
+        id: ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/ccache
+          key: linux-x64-ccache-${{ github.sha }}
+          restore-keys: linux-x64-ccache-
+
       - name: Build AyuGram
         run: |
+          sudo mkdir -p /tmp/ccache && sudo chown -R "$(id -u):$(id -g)" /tmp/ccache
           cd Telegram
           docker run --rm -u "$(id -u):$(id -g)" \
             -v "$(pwd)/..:/usr/src/tdesktop" \
             -e DEBUG=false -e LTO=false \
-            -e JOBS=16 -e CMAKE_BUILD_PARALLEL_LEVEL=16 \
+            -e JOBS=${JOBS} -e CMAKE_BUILD_PARALLEL_LEVEL=${JOBS} \
+            -e CCACHE_DIR=/tmp/ccache \
             tdesktop-centos-env \
-            /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh
+            /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh 2>&1 | tail -50
+
+      - name: Save ccache
+        if: ${{ !cancelled() && steps.ccache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/ccache
+          key: linux-x64-ccache-${{ github.sha }}
+
+      - name: Drop superseded ccache entries
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          keep="${{ steps.ccache.outputs.cache-primary-key }}"
+          gh cache list --repo "$GITHUB_REPOSITORY" --key linux-x64-ccache- --limit 100 --json key --jq '.[].key' |
+            grep -vxF "$keep" | while read -r key; do gh cache delete --repo "$GITHUB_REPOSITORY" "$key"; done || true
 
       - name: Strip and package
         run: |
-          strip --strip-all Telegram/out/Release/Telegram
-          mv Telegram/out/Release/Telegram AyuGram
+          out=$(find Telegram/out -name AyuGram -type f | head -1)
+          test -n "$out" || { echo 'AyuGram binary not found'; exit 1; }
+          strip --strip-all "$out"
+          cp "$out" AyuGram
           tar -czf AyuGram-linux-x64.tar.gz AyuGram
 
       - name: Upload artifact

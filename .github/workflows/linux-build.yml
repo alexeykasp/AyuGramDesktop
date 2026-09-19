@@ -115,7 +115,9 @@ jobs:
             -e JOBS=${JOBS} -e CMAKE_BUILD_PARALLEL_LEVEL=${JOBS} \
             -e CCACHE_DIR=/tmp/ccache \
             tdesktop-centos-env \
-            /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh 2>&1 | tail -50
+            /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh \
+            -D TDESKTOP_API_ID=2040 \
+            -D TDESKTOP_API_HASH=b18441a1ff607e10a989891a5462e627 2>&1 | tail -50
 
       - name: Save ccache
         if: ${{ !cancelled() && steps.ccache.outputs.cache-hit != 'true' }}

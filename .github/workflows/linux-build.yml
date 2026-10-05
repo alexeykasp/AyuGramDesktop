@@ -1,0 +1,160 @@
+name: Linux x64 Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [linux-qt6-7.2.9]
+
+jobs:
+  linux:
+    name: Linux x64 (Qt6, Release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    env:
+      CCACHE_DIR: ${{ runner.temp }}/.tdesktop-cache
+      IMAGE: ayugram/centos_env
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6
+        with:
+          tool-cache: true
+
+      # Upstream publishes the ready env image: Qt 6.11.2 + all library
+      # stages already built. Pulling it skips the 5+ hour Qt compile that
+      # killed earlier from-scratch attempts.
+      - name: Pull upstream env image
+        run: docker pull ghcr.io/telegramdesktop/tdesktop/centos_env:latest
+
+      # The upstream image lacks the three libraries AyuGram's own
+      # Dockerfile adds (protobuf v30.2, libde265 v1.1.1, libheif v1.23.1
+      # over de265). Same versions and flags as the fork's centos_env
+      # Dockerfile, built on top of the pulled image (~10 min).
+      - name: Extend image with protobuf, libde265, libheif
+        run: |
+          mkdir -p /tmp/ext
+          cat > /tmp/ext/Dockerfile <<'DOCKERFILE'
+          FROM ghcr.io/telegramdesktop/tdesktop/centos_env:latest
+
+          RUN <<'EOF'
+          set -e
+
+          git clone -b v30.2 --depth=1 --recursive --shallow-submodules \
+            https://github.com/protocolbuffers/protobuf.git
+          cd protobuf
+          cmake -B build . \
+            -Dprotobuf_BUILD_TESTS=OFF \
+            -Dprotobuf_BUILD_PROTOBUF_BINARIES=ON \
+            -Dprotobuf_BUILD_LIBPROTOC=ON \
+            -Dprotobuf_WITH_ZLIB=OFF
+          cmake --build build --parallel
+          cmake --install build
+          cd ..
+          rm -rf protobuf
+
+          git clone -b v1.1.1 --depth=1 https://github.com/strukturag/libde265.git
+          cd libde265
+          cmake -B build . \
+            -DCMAKE_BUILD_TYPE=None \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DENABLE_DECODER=OFF \
+            -DENABLE_SDL=OFF
+          cmake --build build --parallel
+          cmake --install build
+          cd ..
+          rm -rf libde265
+
+          git clone -b v1.23.1 --depth=1 https://github.com/strukturag/libheif.git
+          cd libheif
+          cmake -B build . \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_DOCUMENTATION=OFF \
+            -DBUILD_TESTING=OFF \
+            -DENABLE_PLUGIN_LOADING=OFF \
+            -DWITH_X265=OFF \
+            -DWITH_AOM_DECODER=OFF \
+            -DWITH_AOM_ENCODER=OFF \
+            -DWITH_X264=OFF \
+            -DWITH_OpenH264_DECODER=OFF \
+            -DWITH_RAV1E=OFF \
+            -DWITH_RAV1E_PLUGIN=OFF \
+            -DWITH_SvtEnc=OFF \
+            -DWITH_SvtEnc_PLUGIN=OFF \
+            -DWITH_DAV1D=OFF \
+            -DWITH_LIBSHARPYUV=OFF \
+            -DWITH_EXAMPLES=OFF
+          cmake --build build --parallel
+          cmake --install build
+          cd ..
+          rm -rf libheif
+          EOF
+          DOCKERFILE
+          docker build -t ayugram/centos_env /tmp/ext
+
+      - name: Restore compiler cache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-linux-x64-release-${{ github.run_id }}
+          restore-keys: ccache-linux-x64-release-
+
+      - name: Build AyuGram
+        run: |
+          docker run --rm \
+            -u $(id -u) \
+            -v $PWD:/usr/src/tdesktop \
+            -v ${{ env.CCACHE_DIR }}:/var/cache/ccache \
+            -e CONFIG=Release \
+            -e CCACHE_SLOPPINESS=pch_defines,time_macros \
+            ${{ env.IMAGE }} \
+            env -u CCACHE_DISABLE /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh \
+            -D CMAKE_CONFIGURATION_TYPES=Release \
+            -D TDESKTOP_API_ID=2040 \
+            -D TDESKTOP_API_HASH=b18441a1ff607e10a989891a5462e627 \
+            -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON \
+            -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
+
+      - name: Save compiler cache
+        # Saved even when the build failed: a retry then resumes from the
+        # objects this run did produce instead of recompiling everything.
+        if: ${{ !cancelled() && steps.ccache-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-linux-x64-release-${{ github.run_id }}
+
+      - name: Drop superseded compiler caches
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          KEEP="ccache-linux-x64-release-${{ github.run_id }}"
+          gh cache list --repo "$GITHUB_REPOSITORY" --key "ccache-linux-x64-release-" --limit 100 --json key --jq '.[].key' |
+            grep -vxF "$KEEP" | while read -r key; do gh cache delete --repo "$GITHUB_REPOSITORY" "$key"; done || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Collect binary
+        run: |
+          BIN=out/Release/AyuGram
+          if [ ! -f "$BIN" ]; then
+            find out -maxdepth 3 -type f | head -40 || true
+            echo "BINARY NOT FOUND"; exit 1
+          fi
+          file "$BIN"
+          mkdir -p dist
+          cp "$BIN" dist/AyuGram
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AyuGram-linux-x64
+          path: dist/AyuGram
+          if-no-files-found: error
+          retention-days: 7

@@ -12,7 +12,6 @@ jobs:
     timeout-minutes: 350
 
     env:
-      CCACHE_DIR: ${{ runner.temp }}/.tdesktop-cache
       IMAGE: ayugram/centos_env
 
     steps:
@@ -101,7 +100,7 @@ jobs:
         id: ccache-restore
         uses: actions/cache/restore@v4
         with:
-          path: ${{ env.CCACHE_DIR }}
+          path: ${{ runner.temp }}/.tdesktop-cache
           key: ccache-linux-x64-release-${{ github.run_id }}
           restore-keys: ccache-linux-x64-release-
 
@@ -110,7 +109,7 @@ jobs:
           docker run --rm \
             -u $(id -u) \
             -v $PWD:/usr/src/tdesktop \
-            -v ${{ env.CCACHE_DIR }}:/var/cache/ccache \
+            -v $RUNNER_TEMP/.tdesktop-cache:/var/cache/ccache \
             -e CONFIG=Release \
             -e CCACHE_SLOPPINESS=pch_defines,time_macros \
             ${{ env.IMAGE }} \
@@ -127,7 +126,7 @@ jobs:
         if: ${{ !cancelled() && steps.ccache-restore.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
-          path: ${{ env.CCACHE_DIR }}
+          path: ${{ runner.temp }}/.tdesktop-cache
           key: ccache-linux-x64-release-${{ github.run_id }}
 
       - name: Drop superseded compiler caches

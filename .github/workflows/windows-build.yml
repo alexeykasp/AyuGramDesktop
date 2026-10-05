@@ -1,0 +1,205 @@
+name: Windows x64 Build
+
+on:
+  push:
+    branches: [win-qt6-7.2.9]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  # The runner image leaves ~25 GB free on C:, a Release build does not fit;
+  # the workspace drive is 150 GB and all but empty.
+  TBUILD: ${{ github.workspace }}\TBuild
+  SRC: ${{ github.workspace }}\TBuild\tdesktop
+  CCACHE_DIR: ${{ github.workspace }}\TBuild\ccache
+  CCACHE_DEPEND: 'true'
+  # 2554 objects do not fit in two gigabytes: the cache filled to 98% and
+  # evicted 655 of its own entries mid-build, costing a quarter of the hits.
+  CCACHE_MAXSIZE: 3G
+  CCACHE_COMPILERCHECK: content
+  CCACHE_SLOPPINESS: pch_defines,time_macros
+
+jobs:
+  build:
+    name: Windows x64 (Qt6)
+    runs-on: windows-latest
+    timeout-minutes: 350
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          path: TBuild/tdesktop
+
+      - name: Read toolchain version
+        id: toolchain
+        shell: bash
+        run: |
+          sdk=$(sed -n 's/.*\*\*\([^*]*\)\*\* SDK version.*/\1/p' "$SRC/docs/building-win.md" | head -1)
+          test -n "$sdk"
+          echo "sdk=$sdk" >> "$GITHUB_OUTPUT"
+
+      - name: Install Visual Studio ATL component
+        run: |
+          $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
+          $vswhere = Join-Path $installer 'vswhere.exe'
+          $setup = Join-Path $installer 'setup.exe'
+          $toolsComponent = 'Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64'
+          $atlComponent = 'Microsoft.VisualStudio.Component.VC.14.44.17.14.ATL'
+          $path = @(& $vswhere -latest -products '*' -requires $toolsComponent -property installationPath)[0]
+          if (-not $path) { throw "No Visual Studio instance provides $toolsComponent." }
+          $toolset = Get-ChildItem (Join-Path $path 'VC\Tools\MSVC') -Directory |
+            Where-Object { $_.Name -like '14.44.*' } |
+            Sort-Object Name -Descending |
+            Select-Object -First 1
+          $header = Join-Path $toolset.FullName 'atlmfc\include\atlbase.h'
+          if (-not (Test-Path $header)) {
+            $process = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
+              'modify', '--installPath', "`"$path`"", '--add', $atlComponent,
+              '--quiet', '--norestart', '--nocache')
+            if ($process.ExitCode -notin @(0, 3010)) { exit $process.ExitCode }
+          }
+          if (-not (Test-Path $header)) { throw "ATL was not installed at $header." }
+
+      - name: Native Tools Command Prompt
+        uses: Eden-CI/msvc-dev-cmd@1bd71f95d6f3d1b2b3395b335cc63bcdc90cf223
+        with:
+          arch: x64
+          sdk: ${{ steps.toolchain.outputs.sdk }}
+          toolset: '14.44'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install the compiler cache
+        run: |
+          choco install ccache --version=4.14.0 --no-progress -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ccache --version
+
+      - name: Restore ThirdParty cache
+        id: third-party-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: windows-x64-third-party-${{ steps.toolchain.outputs.sdk }}
+          restore-keys: windows-x64-third-party-
+
+      - name: Restore libraries cache
+        id: libraries-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.TBUILD }}\Libraries\win64
+          key: windows-x64-release-libraries-${{ steps.toolchain.outputs.sdk }}
+          restore-keys: windows-x64-release-libraries-
+
+      - name: Prepare libraries
+        shell: cmd
+        env:
+          # meson picks ccache up from PATH and parses the `/showIncludes`
+          # output it wraps, so a compiler cache here breaks the setup of
+          # every meson library. The dependency tree is cached whole anyway.
+          CCACHE_DISABLE: '1'
+        run: call %SRC%\Telegram\build\prepare\win.bat silent qt6
+
+      - name: Save ThirdParty cache
+        if: steps.third-party-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: windows-x64-third-party-${{ steps.toolchain.outputs.sdk }}
+
+      - name: Save libraries cache
+        if: steps.libraries-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TBUILD }}\Libraries\win64
+          key: windows-x64-release-libraries-${{ steps.toolchain.outputs.sdk }}
+
+      - name: Drop superseded dependency caches
+        continue-on-error: true
+        shell: bash
+        env:
+          KEEP: |
+            ${{ steps.third-party-cache.outputs.cache-primary-key }}
+            ${{ steps.libraries-cache.outputs.cache-primary-key }}
+          PREFIXES: 'windows-x64-third-party- windows-x64-release-libraries-'
+        run: |
+          # Kept under ten gigabytes by deleting what each save superseded,
+          # right after that save rather than at the end of the job.
+          for prefix in $PREFIXES; do
+            gh cache list --repo "$GITHUB_REPOSITORY" --key "$prefix" --limit 100 --json key --jq '.[].key' |
+              grep -vxF "$KEEP" | while read -r key; do gh cache delete --repo "$GITHUB_REPOSITORY" "$key"; done || true
+          done
+
+      - name: Restore compiler cache
+        id: compiler-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.TBUILD }}\ccache
+          key: ccache-windows-x64-release-${{ github.sha }}
+          restore-keys: ccache-windows-x64-release-
+
+      - name: Configure Release
+        shell: cmd
+        run: |
+          ccache --zero-stats
+          cd /d %SRC%\Telegram
+          call configure.bat qt6 -G "Ninja Multi-Config" ^
+            -D CMAKE_CONFIGURATION_TYPES=Release ^
+            -D CMAKE_EXPORT_COMPILE_COMMANDS=ON ^
+            "-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=" ^
+            -D CMAKE_C_COMPILER_LAUNCHER=ccache ^
+            -D CMAKE_CXX_COMPILER_LAUNCHER=ccache ^
+            -D TDESKTOP_API_ID=2040 ^
+            -D TDESKTOP_API_HASH=b18441a1ff607e10a989891a5462e627 ^
+            -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
+            -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
+
+      - name: Build AyuGram
+        shell: cmd
+        run: cmake --build %SRC%\out --config Release --parallel --target Telegram
+
+      - name: Save compiler cache
+        # Saved even when the build failed: a retry then resumes from the
+        # objects this run did produce instead of recompiling everything.
+        if: ${{ !cancelled() && steps.compiler-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TBUILD }}\ccache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+
+      - name: Drop superseded compiler caches
+        # Matches the save above, so a failed build still replaces its cache.
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        env:
+          KEEP: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+          PREFIXES: ccache-windows-x64-release-
+        run: |
+          # Deleted before the save rather than after it: the two would
+          # otherwise coexist and the repository would pass the ten
+          # gigabyte limit, evicting a dependency tree that costs hours.
+          for prefix in $PREFIXES; do
+            gh cache list --repo "$GITHUB_REPOSITORY" --key "$prefix" --limit 100 --json key --jq '.[].key' |
+              grep -vxF "$KEEP" | while read -r key; do gh cache delete --repo "$GITHUB_REPOSITORY" "$key"; done || true
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AyuGram-windows-x64
+          path: |
+            ${{ env.SRC }}\out\Release\AyuGram.exe
+            ${{ env.SRC }}\out\Telegram\Release\*.exe
+          if-no-files-found: error

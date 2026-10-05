@@ -83,7 +83,7 @@ if not os.path.isdir(os.path.join(thirdPartyDir, keysLoc)):
     pathlib.Path(os.path.join(thirdPartyDir, keysLoc)).mkdir(parents=True, exist_ok=True)
 
 pathPrefixes = [
-    'ThirdParty\\msys64\\mingw64\\bin',
+    'ThirdParty\\msys64\\ucrt64\\bin',
     'ThirdParty\\jom',
     'ThirdParty\\gyp',
 ] if win else [

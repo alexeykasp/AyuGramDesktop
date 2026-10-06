@@ -41,6 +41,11 @@ jobs:
           cat > /tmp/ext/Dockerfile <<'DOCKERFILE'
           FROM ghcr.io/telegramdesktop/tdesktop/centos_env:latest
 
+          # The image's final stage runs as a non-root user, which cannot
+          # create the clone dirs; build as root in a scratch dir.
+          USER root
+          WORKDIR /tmp/ext-build
+
           RUN <<'EOF'
           set -e
 
@@ -92,7 +97,12 @@ jobs:
           cmake --install build
           cd ..
           rm -rf libheif
+          cd / && rm -rf /tmp/ext-build
           EOF
+
+          # build.sh starts with a relative "cd Telegram", so the image's
+          # workdir must stay where the repo gets mounted.
+          WORKDIR /usr/src/tdesktop
           DOCKERFILE
           docker build -t ayugram/centos_env /tmp/ext
 
